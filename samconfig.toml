@@ -1,0 +1,65 @@
+# samconfig.toml — SAM CLI deployment configuration
+# CD-016 Serverless Architecture on AWS Lambda
+# Usage:
+#   sam build && sam deploy                    → deploys to dev
+#   sam build && sam deploy --config-env prod  → deploys to prod
+
+version = 0.1
+
+# ─────────────────────────────────────────────
+# DEV ENVIRONMENT (default)
+# ─────────────────────────────────────────────
+[default]
+[default.global.parameters]
+stack_name = "cd016-serverless-dev"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name        = "cd016-serverless-dev"
+s3_bucket         = "sam-artifacts-544885082971"   # sam deploy --guided will create this
+s3_prefix         = "cd016-serverless-dev"
+region            = "ap-south-1"                      # Mumbai
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = [
+  "Environment=dev",
+  "JwtSecret=dev-secret-change-in-prod"
+]
+tags = "Project=cd-016-serverless Environment=dev"
+
+[default.sync.parameters]
+watch = true
+
+[default.local_invoke.parameters]
+env_vars = "env.json"
+
+[default.local_start_api.parameters]
+env_vars = "env.json"
+port     = 3000
+
+# ─────────────────────────────────────────────
+# PROD ENVIRONMENT
+# ─────────────────────────────────────────────
+[prod]
+[prod.global.parameters]
+stack_name = "cd016-serverless-prod"
+
+[prod.build.parameters]
+cached   = true
+parallel = true
+
+[prod.deploy.parameters]
+stack_name        = "cd016-serverless-prod"
+s3_bucket         = "sam-artifacts-544885082971"
+s3_prefix         = "cd016-serverless-prod"
+region            = "ap-south-1"
+confirm_changeset = true
+capabilities      = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = [
+  "Environment=prod",
+  "JwtSecret=REPLACE_WITH_STRONG_PROD_SECRET"
+]
+tags = "Project=cd-016-serverless Environment=prod"

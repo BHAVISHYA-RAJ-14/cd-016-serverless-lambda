@@ -1,0 +1,190 @@
+# .github/workflows/deploy.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# CD-016 Serverless Architecture — GitHub Actions CI/CD Pipeline
+#
+# Triggers:
+#   - Push to main    → build + test + deploy to dev
+#   - Push to prod    → build + test + deploy to prod
+#   - Pull Request    → build + test only (no deploy)
+#
+# Security:
+#   - OIDC keyless auth to AWS (no stored AWS keys)
+#   - Secrets in GitHub repository settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CD-016 Serverless CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - prod
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION:  ap-south-1
+  SAM_VERSION: 1.113.0
+  PYTHON_VERSION: "3.12"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── JOB 1: Build & Test ────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            aws-lambda-powertools[all]==2.37.0 \
+            PyJWT==2.8.0 \
+            pytest==8.1.0 \
+            pytest-mock==3.12.0 \
+            moto[all]==5.0.0 \
+            boto3==1.34.0 \
+            flake8==7.0.0
+
+      - name: Lint check
+        run: |
+          flake8 src/ \
+            --max-line-length=120 \
+            --ignore=E501,W503,E402 \
+            --exclude=.aws-sam,layers
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/unit/ \
+            -v \
+            --tb=short \
+            --junitxml=test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          version: ${{ env.SAM_VERSION }}
+
+      - name: SAM Build (validate template + build)
+        run: |
+          sam build --cached --parallel
+          sam validate --lint
+
+      - name: Upload SAM build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-build-${{ github.sha }}
+          path: .aws-sam/build/
+          retention-days: 1
+
+  # ── JOB 2: Deploy to Dev ───────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev
+
+    permissions:
+      id-token: write     # Required for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — keyless auth)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_ROLE_ARN_DEV }}
+          role-session-name: cd016-github-actions-dev
+          aws-region:        ${{ env.AWS_REGION }}
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          version: ${{ env.SAM_VERSION }}
+
+      - name: Download SAM build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sam-build-${{ github.sha }}
+          path: .aws-sam/build/
+
+      - name: SAM Deploy to Dev
+        run: |
+          sam deploy \
+            --config-env default \
+            --region ${{ env.AWS_REGION }} \
+            --no-fail-on-empty-changeset \
+            --no-confirm-changeset \
+            --parameter-overrides \
+              "Environment=dev" \
+              "JwtSecret=${{ secrets.JWT_SECRET_DEV }}"
+
+      - name: Get stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name cd016-serverless-dev \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs' \
+            --output table
+
+  # ── JOB 3: Deploy to Prod ──────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy to Prod
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/prod' && github.event_name == 'push'
+    environment: prod
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_ROLE_ARN_PROD }}
+          role-session-name: cd016-github-actions-prod
+          aws-region:        ${{ env.AWS_REGION }}
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          version: ${{ env.SAM_VERSION }}
+
+      - name: SAM Deploy to Prod
+        run: |
+          sam build --cached --parallel
+          sam deploy \
+            --config-env prod \
+            --region ${{ env.AWS_REGION }} \
+            --no-fail-on-empty-changeset \
+            --no-confirm-changeset \
+            --parameter-overrides \
+              "Environment=prod" \
+              "JwtSecret=${{ secrets.JWT_SECRET_PROD }}"

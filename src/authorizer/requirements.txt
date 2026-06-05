@@ -1,0 +1,2 @@
+# PyJWT for token validation — comes from Lambda Layer
+# This file is intentionally empty

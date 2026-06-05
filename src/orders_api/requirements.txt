@@ -1,0 +1,6 @@
+# src/orders_api/requirements.txt
+# These are bundled WITH the function (not in the layer)
+# Keep this minimal — heavy deps go in layers/common/requirements.txt
+
+# No additional deps needed here — powertools + boto3 come from the Lambda Layer
+# This file is intentionally minimal to keep deployment package small (cold start optimisation)

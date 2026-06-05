@@ -1,0 +1,27 @@
+# layers/common/requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared Lambda Layer — installed ONCE, available to ALL Lambda functions.
+# This is key to cold start optimisation:
+#   - Deps in the layer are cached separately from function code
+#   - Functions stay tiny → faster deployment + faster cold start
+#
+# SAM builds this with: BuildMethod: python3.12 (set in template.yaml)
+# Compatible with: python3.12, arm64 (Graviton2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# AWS Lambda Powertools — structured logging, tracing, metrics, validation
+# https://docs.powertools.aws.dev/lambda/python/latest/
+aws-lambda-powertools[all]==2.37.0
+
+# PyJWT — JWT decode/encode for Lambda Authorizer
+PyJWT==2.8.0
+
+# cryptography — required by PyJWT for RS256 support (future-proofing)
+cryptography==42.0.5
+
+# boto3 extras (AWS SDK is pre-installed in Lambda runtime, but pinning for local dev)
+# DO NOT include boto3 here — Lambda runtime provides it, adding it bloats the layer
+# boto3==1.34.0   ← DO NOT UNCOMMENT
+
+# pydantic — optional: use for stricter request/response validation
+# pydantic==2.6.0

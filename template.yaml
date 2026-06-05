@@ -1,0 +1,510 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CD-016 Serverless Architecture on AWS Lambda
+  Production-grade serverless platform with API Gateway, EventBridge,
+  Step Functions, Lambda Powertools, and full observability.
+
+# -------------------------------------------
+# GLOBAL DEFAULTS - applied to all Lambda functions
+# -------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Layers:
+      - !Ref CommonLayer
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: cd016-serverless
+        POWERTOOLS_LOG_LEVEL: INFO
+        POWERTOOLS_TRACER_CAPTURE_RESPONSE: true
+        POWERTOOLS_TRACER_CAPTURE_ERROR: true
+        ENVIRONMENT: !Ref Environment
+        ORDERS_TABLE: !Ref OrdersTable
+        EVENT_BUS_NAME: !Ref ServerlessOrdersBus
+    Tags:
+      Project: cd-016-serverless
+      Environment: !Ref Environment
+      ManagedBy: SAM
+
+# -------------------------------------------
+# PARAMETERS
+# -------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  JwtSecret:
+    Type: String
+    Default: dev-secret-change-in-prod
+    NoEcho: true
+    Description: JWT signing secret for Lambda Authorizer
+
+# -------------------------------------------
+# RESOURCES
+# -------------------------------------------
+Resources:
+
+  # -- LAMBDA LAYER: Shared dependencies --------
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub cd016-common-layer-${Environment}
+      Description: Shared dependencies - Lambda Powertools, PyJWT
+      ContentUri: layers/common/
+      CompatibleRuntimes:
+        - python3.12
+      CompatibleArchitectures:
+        - arm64
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.12
+      BuildArchitecture: arm64
+
+  # -- DYNAMODB: Orders Table -------------------
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cd016-orders-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Project
+          Value: cd-016-serverless
+
+  # -- EVENTBRIDGE: Custom Event Bus ------------
+  ServerlessOrdersBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub cd016-orders-bus-${Environment}
+
+  # -- SQS: Dead Letter Queue -------------------
+  EventsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub cd016-events-dlq-${Environment}
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Project
+          Value: cd-016-serverless
+
+  # -- SNS: Budget Alert Topic ------------------
+  BudgetAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub cd016-budget-alerts-${Environment}
+      Subscription:
+        - Protocol: email
+          Endpoint: savagemess336@gmail.com
+
+  # -------------------------------------------
+  # API GATEWAY - HTTP API
+  # -------------------------------------------
+  ServerlessApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      Description: CD-016 Serverless Orders API
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Correlation-ID
+        MaxAge: 300
+      Auth:
+        DefaultAuthorizer: LambdaJwtAuthorizer
+        Authorizers:
+          LambdaJwtAuthorizer:
+            AuthorizerPayloadFormatVersion: "2.0"
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            FunctionInvokeRole: !GetAtt ApiGatewayInvokeRole.Arn
+            Identity:
+              Headers:
+                - Authorization
+            AuthorizerResultTtlInSeconds: 300
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId", "ip":"$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod", "routeKey":"$context.routeKey", "status":"$context.status", "protocol":"$context.protocol", "responseLength":"$context.responseLength"}'
+      Tags:
+        Project: cd-016-serverless
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/cd016-${Environment}
+      RetentionInDays: 7
+
+  # -------------------------------------------
+  # LAMBDA FUNCTIONS
+  # -------------------------------------------
+
+  # 1. JWT Lambda Authorizer
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cd016-authorizer-${Environment}
+      CodeUri: src/authorizer/
+      Handler: app.lambda_handler
+      Description: JWT Lambda Authorizer with 5-min result cache
+      MemorySize: 128
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JwtSecret
+
+  # 2. Orders API - core CRUD handler
+  # ORDER_WORKFLOW_ARN injected here only (not in Globals) to break circular dep
+  OrdersApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cd016-orders-api-${Environment}
+      CodeUri: src/orders_api/
+      Handler: app.lambda_handler
+      Description: Orders REST API - Create, Read, Update orders
+      Environment:
+        Variables:
+          ORDER_WORKFLOW_ARN: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:cd016-order-fulfillment-${Environment}
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref ServerlessOrdersBus
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: states:StartExecution
+              Resource: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:cd016-order-fulfillment-${Environment}
+      Events:
+        CreateOrder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ServerlessApi
+            Method: POST
+            Path: /orders
+        GetOrder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ServerlessApi
+            Method: GET
+            Path: /orders/{orderId}
+        ListOrders:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ServerlessApi
+            Method: GET
+            Path: /orders
+        UpdateOrder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ServerlessApi
+            Method: PUT
+            Path: /orders/{orderId}
+        HealthCheck:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ServerlessApi
+            Method: GET
+            Path: /health
+            Auth:
+              Authorizer: NONE
+
+  # 3. Inventory Lambda - triggered by EventBridge
+  InventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cd016-inventory-${Environment}
+      CodeUri: src/inventory/
+      Handler: app.lambda_handler
+      Description: Inventory reservation - triggered by OrderPlaced event
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt EventsDLQ.QueueName
+      Events:
+        OrderPlacedEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref ServerlessOrdersBus
+            Pattern:
+              source:
+                - cd016.orders
+              detail-type:
+                - OrderPlaced
+
+  # 4. Payment Lambda - triggered by EventBridge
+  PaymentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cd016-payment-${Environment}
+      CodeUri: src/payment/
+      Handler: app.lambda_handler
+      Description: Payment processing - triggered by OrderPlaced event
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt EventsDLQ.QueueName
+      Events:
+        OrderPlacedForPayment:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref ServerlessOrdersBus
+            Pattern:
+              source:
+                - cd016.orders
+              detail-type:
+                - OrderPlaced
+
+  # 5. Email Notifier Lambda - triggered by multiple events
+  EmailNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cd016-email-notifier-${Environment}
+      CodeUri: src/email_notifier/
+      Handler: app.lambda_handler
+      Description: Email notifications for all order lifecycle events
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt BudgetAlertTopic.TopicName
+      Events:
+        OrderPlaced:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref ServerlessOrdersBus
+            Pattern:
+              source:
+                - cd016.orders
+              detail-type:
+                - OrderPlaced
+        PaymentProcessed:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref ServerlessOrdersBus
+            Pattern:
+              source:
+                - cd016.orders
+              detail-type:
+                - PaymentProcessed
+        OrderFulfilled:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref ServerlessOrdersBus
+            Pattern:
+              source:
+                - cd016.orders
+              detail-type:
+                - OrderFulfilled
+
+  # -------------------------------------------
+  # STEP FUNCTIONS - Order Fulfillment Workflow
+  # -------------------------------------------
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cd016-stepfunctions-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt InventoryFunction.Arn
+                  - !GetAtt PaymentFunction.Arn
+                  - !GetAtt EmailNotifierFunction.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !GetAtt ServerlessOrdersBus.Arn
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+
+  OrderFulfillmentWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub cd016-order-fulfillment-${Environment}
+      DefinitionUri: src/step_functions/order_workflow.asl.json
+      DefinitionSubstitutions:
+        InventoryFunctionArn: !GetAtt InventoryFunction.Arn
+        PaymentFunctionArn: !GetAtt PaymentFunction.Arn
+        EmailNotifierFunctionArn: !GetAtt EmailNotifierFunction.Arn
+        OrdersTableName: !Ref OrdersTable
+        EventBusName: !Ref ServerlessOrdersBus
+      Role: !GetAtt StepFunctionsRole.Arn
+      Tracing:
+        Enabled: true
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      Tags:
+        Project: cd-016-serverless
+
+  StepFunctionsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/states/cd016-order-fulfillment-${Environment}
+      RetentionInDays: 7
+
+  # -------------------------------------------
+  # IAM ROLES
+  # -------------------------------------------
+  ApiGatewayInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cd016-apigw-invoke-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaAuthorizer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt AuthorizerFunction.Arn
+
+  # -------------------------------------------
+  # CLOUDWATCH: Log Groups per Lambda
+  # -------------------------------------------
+  OrdersApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cd016-orders-api-${Environment}
+      RetentionInDays: 7
+
+  AuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cd016-authorizer-${Environment}
+      RetentionInDays: 7
+
+  InventoryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cd016-inventory-${Environment}
+      RetentionInDays: 7
+
+  PaymentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cd016-payment-${Environment}
+      RetentionInDays: 7
+
+  EmailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cd016-email-notifier-${Environment}
+      RetentionInDays: 7
+
+# -------------------------------------------
+# OUTPUTS - shown after sam deploy
+# -------------------------------------------
+Outputs:
+  ApiEndpoint:
+    Description: HTTP API Gateway endpoint URL
+    Value: !Sub https://${ServerlessApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub cd016-api-endpoint-${Environment}
+
+  OrdersTableName:
+    Description: DynamoDB Orders table name
+    Value: !Ref OrdersTable
+    Export:
+      Name: !Sub cd016-orders-table-${Environment}
+
+  EventBusName:
+    Description: EventBridge custom bus name
+    Value: !Ref ServerlessOrdersBus
+    Export:
+      Name: !Sub cd016-event-bus-${Environment}
+
+  OrderWorkflowArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref OrderFulfillmentWorkflow
+    Export:
+      Name: !Sub cd016-workflow-arn-${Environment}
+
+  CommonLayerArn:
+    Description: Common Lambda Layer ARN
+    Value: !Ref CommonLayer
+    Export:
+      Name: !Sub cd016-common-layer-${Environment}

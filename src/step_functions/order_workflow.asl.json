@@ -1,0 +1,269 @@
+{
+  "Comment": "CD-016 Order Fulfillment Workflow — Express Workflow for high-volume processing. Flow: Validate → Reserve Inventory (parallel items) → Charge Payment → Send Confirmation → Update Fulfillment",
+  "StartAt": "ValidateOrder",
+  "States": {
+
+    "ValidateOrder": {
+      "Type": "Task",
+      "Comment": "Validate order data before processing — check required fields, non-zero total",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "${OrdersTableName}",
+        "Key": {
+          "orderId": {
+            "S.$": "$.orderId"
+          }
+        }
+      },
+      "ResultPath": "$.validation",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "DynamoDB.ProvisionedThroughputExceededException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "Comment": "Exponential backoff on DynamoDB throttle"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "OrderValidationFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckOrderExists"
+    },
+
+    "CheckOrderExists": {
+      "Type": "Choice",
+      "Comment": "Branch based on whether order exists in DynamoDB",
+      "Choices": [
+        {
+          "Variable": "$.validation.Item",
+          "IsPresent": true,
+          "Next": "ReserveInventory"
+        }
+      ],
+      "Default": "OrderValidationFailed"
+    },
+
+    "ReserveInventory": {
+      "Type": "Task",
+      "Comment": "Call Inventory Lambda — reserve stock for each item in parallel via Map state",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${InventoryFunctionArn}",
+        "Payload": {
+          "detail.$": "$",
+          "detail-type": "OrderPlaced",
+          "source": "stepfunctions.cd016"
+        }
+      },
+      "ResultSelector": {
+        "inventoryResult.$": "$.Payload"
+      },
+      "ResultPath": "$.inventory",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "InventoryReservationFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckInventoryResult"
+    },
+
+    "CheckInventoryResult": {
+      "Type": "Choice",
+      "Comment": "Branch: did inventory reservation succeed?",
+      "Choices": [
+        {
+          "Variable": "$.inventory.inventoryResult.status",
+          "StringEquals": "INVENTORY_RESERVED",
+          "Next": "ChargePayment"
+        }
+      ],
+      "Default": "InventoryReservationFailed"
+    },
+
+    "ChargePayment": {
+      "Type": "Task",
+      "Comment": "Call Payment Lambda — charge customer for the order",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${PaymentFunctionArn}",
+        "Payload": {
+          "detail.$": "$",
+          "detail-type": "OrderPlaced",
+          "source": "stepfunctions.cd016"
+        }
+      },
+      "ResultSelector": {
+        "paymentResult.$": "$.Payload"
+      },
+      "ResultPath": "$.payment",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0,
+          "Comment": "Limit payment retries — avoid double charging"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PaymentFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckPaymentResult"
+    },
+
+    "CheckPaymentResult": {
+      "Type": "Choice",
+      "Comment": "Branch: did payment succeed?",
+      "Choices": [
+        {
+          "Variable": "$.payment.paymentResult.status",
+          "StringEquals": "PAYMENT_PROCESSED",
+          "Next": "SendConfirmation"
+        }
+      ],
+      "Default": "PaymentFailed"
+    },
+
+    "SendConfirmation": {
+      "Type": "Task",
+      "Comment": "Send order confirmation email via Email Notifier Lambda",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EmailNotifierFunctionArn}",
+        "Payload": {
+          "detail.$": "$",
+          "detail-type": "PaymentProcessed",
+          "source": "stepfunctions.cd016"
+        }
+      },
+      "ResultPath": "$.confirmation",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "UpdateFulfillmentStatus",
+          "ResultPath": "$.confirmationError",
+          "Comment": "Email failure is non-fatal — continue to fulfillment"
+        }
+      ],
+      "Next": "UpdateFulfillmentStatus"
+    },
+
+    "UpdateFulfillmentStatus": {
+      "Type": "Task",
+      "Comment": "Final step — update DynamoDB order status to FULFILLED",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${OrdersTableName}",
+        "Key": {
+          "orderId": {
+            "S.$": "$.orderId"
+          }
+        },
+        "UpdateExpression": "SET #s = :fulfilled, fulfilledAt = :now",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":fulfilled": {
+            "S": "FULFILLED"
+          },
+          ":now": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.fulfillment",
+      "Retry": [
+        {
+          "ErrorEquals": ["DynamoDB.ProvisionedThroughputExceededException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "WorkflowSucceeded"
+    },
+
+    "WorkflowSucceeded": {
+      "Type": "Succeed",
+      "Comment": "Order fulfilled successfully — terminal success state"
+    },
+
+    "OrderValidationFailed": {
+      "Type": "Fail",
+      "Error":   "OrderValidationError",
+      "Cause":   "Order not found or validation failed"
+    },
+
+    "InventoryReservationFailed": {
+      "Type": "Task",
+      "Comment": "Notify customer of inventory failure then fail workflow",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EmailNotifierFunctionArn}",
+        "Payload": {
+          "detail.$": "$",
+          "detail-type": "InventoryFailed",
+          "source": "stepfunctions.cd016"
+        }
+      },
+      "ResultPath": null,
+      "Next": "InventoryFailedTerminal"
+    },
+
+    "InventoryFailedTerminal": {
+      "Type": "Fail",
+      "Error": "InventoryReservationError",
+      "Cause": "Could not reserve inventory for one or more items"
+    },
+
+    "PaymentFailed": {
+      "Type": "Task",
+      "Comment": "Notify customer of payment failure then fail workflow",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EmailNotifierFunctionArn}",
+        "Payload": {
+          "detail.$": "$",
+          "detail-type": "PaymentFailed",
+          "source": "stepfunctions.cd016"
+        }
+      },
+      "ResultPath": null,
+      "Next": "PaymentFailedTerminal"
+    },
+
+    "PaymentFailedTerminal": {
+      "Type": "Fail",
+      "Error": "PaymentProcessingError",
+      "Cause": "Payment processing failed"
+    }
+  }
+}

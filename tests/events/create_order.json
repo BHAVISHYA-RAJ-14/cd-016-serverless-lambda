@@ -1,0 +1,16 @@
+{
+  "requestContext": {
+    "requestId": "test-request-create-001",
+    "http": {
+      "method": "POST",
+      "path": "/orders"
+    }
+  },
+  "headers": {
+    "Authorization": "Bearer test-token",
+    "Content-Type": "application/json"
+  },
+  "queryStringParameters": null,
+  "pathParameters": null,
+  "body": "{\"userId\": \"user-bhavishya-01\", \"items\": [{\"productId\": \"prod-laptop-x1\", \"quantity\": 1, \"price\": 75000.00}, {\"productId\": \"prod-mouse-m2\", \"quantity\": 2, \"price\": 1500.00}], \"shippingAddress\": \"GLA University, Mathura, UP, India\"}"
+}

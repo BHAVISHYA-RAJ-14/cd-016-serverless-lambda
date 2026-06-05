@@ -1,0 +1,12 @@
+{
+  "routeArn": "arn:aws:execute-api:ap-south-1:123456789:abc123/dev/POST/orders",
+  "identitySource": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLWJoYXZpc2h5YS0wMSIsImVtYWlsIjoiYmhhdmlzaHlhQGV4YW1wbGUuY29tIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.placeholder",
+  "headers": {
+    "authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLWJoYXZpc2h5YS0wMSIsImVtYWlsIjoiYmhhdmlzaHlhQGV4YW1wbGUuY29tIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.placeholder"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "abc123",
+    "stage": "dev"
+  }
+}
