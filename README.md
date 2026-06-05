@@ -215,6 +215,16 @@ make delete-dev        # ⚠️ Destroy dev stack
 
 ---
 
+## 📸 Live Evidence
+
+| Resource | Screenshot |
+|---|---|
+| GitHub Actions — CI/CD Green | ![CI/CD](docs/01-github-actions-green.png) |
+| API Gateway — HTTP API Live | ![API GW](docs/02-api-gateway.png) |
+| Lambda Functions (5) — Python 3.12 arm64 | ![Lambda](docs//03-lambda-functions.png) |
+| Step Functions — Order Fulfillment Active | ![Step Functions](docs/04-step-functions.png) |
+| DynamoDB — Orders Table Active | ![DynamoDB](docs/05-dynamodb-table.png) |
+
 ## 👤 Author
 
 **Bhavishya Raj**
