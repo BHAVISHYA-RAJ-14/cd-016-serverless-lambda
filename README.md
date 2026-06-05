@@ -218,7 +218,7 @@ make delete-dev        # ⚠️ Destroy dev stack
 ## 👤 Author
 
 **Bhavishya Raj**
-Cloud & DevOps Intern · NAI26MAR-CD-01 · Next Afield
+Cloud & DevOps Intern · Next Afield
 AWS Student Builder Group Leader · GLA University
 
 [![GitHub](https://img.shields.io/badge/GitHub-BHAVISHYA--RAJ--14-black?logo=github)](https://github.com/BHAVISHYA-RAJ-14)
