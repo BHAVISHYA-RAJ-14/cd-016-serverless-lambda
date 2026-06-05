@@ -5,7 +5,7 @@
 [![AWS SAM](https://img.shields.io/badge/AWS-SAM-orange?logo=amazonaws)](https://aws.amazon.com/serverless/sam/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> **Production-grade serverless platform** — Lambda, API Gateway (HTTP API), EventBridge, Step Functions, Lambda Powertools, cold start optimisation, and full CloudWatch observability. Built as part of the Next Afield Cloud & DevOps internship (Intern ID: NAI26MAR-CD-01).
+> **Production-grade serverless platform** — Lambda, API Gateway (HTTP API), EventBridge, Step Functions, Lambda Powertools, cold start optimisation, and full CloudWatch observability. Built as part of the Next Afield Cloud & DevOps internship.
 
 ---
 
